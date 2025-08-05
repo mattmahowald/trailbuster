@@ -103,58 +103,91 @@ class SalesforceAuth:
             self.logger.error(f"Failed to create browser context: {e}")
             raise
 
-    def check_session_validity(self, context: BrowserContext) -> bool:
-        """Check if the saved session is still valid."""
+    def check_login_status(self, context: BrowserContext) -> bool:
+        """Check if the user is currently logged in to Trailhead."""
         try:
-            self.logger.info("Checking session validity...")
+            self.logger.info("Checking login status...")
 
-            page = context.new_page()
-            page.goto("https://trailhead.salesforce.com/", timeout=30000)
+            # Use the existing page
+            if not self.page:
+                self.page = context.new_page()
+
+            self.page.goto("https://trailhead.salesforce.com/home", timeout=30000)
 
             # Wait for page to load
-            page.wait_for_load_state("networkidle", timeout=10000)
+            self.page.wait_for_load_state("networkidle", timeout=10000)
 
-            # Check for login indicators
-            login_indicators = [
+            # Check for logged-in indicators (user is logged in if these are found)
+            logged_in_indicators = [
                 "[data-testid='user-menu']",
                 ".user-menu",
                 ".profile-menu",
                 "[data-testid='profile']",
                 ".profile",
+                ".user-profile",
+                "[data-testid='avatar']",
+                ".avatar",
+                ".user-avatar",
+                "img[alt*='profile']",
+                "img[alt*='avatar']",
+                ".user-info",
+                ".user-details",
+                "[data-testid='user-info']",
+                ".trailhead-user",
+                ".user-dropdown",
+                ".account-menu",
             ]
 
-            for selector in login_indicators:
+            for selector in logged_in_indicators:
                 try:
-                    element = page.locator(selector).first
+                    element = self.page.locator(selector).first
                     if element.is_visible():
-                        self.logger.info(f"Session valid: found {selector}")
-                        page.close()
+                        self.logger.info(f"User is logged in: found {selector}")
                         return True
                 except:
                     continue
 
-            # Check for logout/login buttons (indicates not logged in)
-            logout_indicators = [
+            # Check for logged-out indicators (user is not logged in if these are found)
+            logged_out_indicators = [
                 "[data-testid='login-button']",
                 ".login-button",
                 "a[href*='login']",
+                "button:has-text('Log In')",
+                "button:has-text('Sign In')",
+                "a:has-text('Log In')",
+                "a:has-text('Sign In')",
+                ".login-link",
+                ".signin-button",
+                "[data-testid='signin']",
             ]
 
-            for selector in logout_indicators:
+            for selector in logged_out_indicators:
                 try:
-                    element = page.locator(selector).first
+                    element = self.page.locator(selector).first
                     if element.is_visible():
-                        self.logger.info(f"Login required: found {selector}")
-                        page.close()
+                        self.logger.info(f"User is not logged in: found {selector}")
                         return False
                 except:
                     continue
 
-            page.close()
+            # If we can't determine status, check the URL
+            current_url = self.page.url
+            if "login" in current_url or "sessions" in current_url:
+                self.logger.info(
+                    f"User is not logged in: current URL contains login/sessions: {current_url}"
+                )
+                return False
+            elif "home" in current_url or "trailhead.salesforce.com" in current_url:
+                self.logger.info(
+                    f"User appears to be logged in: current URL: {current_url}"
+                )
+                return True
+
+            self.logger.warning("Could not determine login status")
             return False
 
         except Exception as e:
-            self.logger.error(f"Session check failed: {e}")
+            self.logger.error(f"Login status check failed: {e}")
             return False
 
     def login(self, email: str, use_saved_session: bool = True) -> LoginResult:
@@ -169,10 +202,9 @@ class SalesforceAuth:
             if use_saved_session and os.path.exists(self.session_file):
                 try:
                     self.context = self._create_context(self.session_file)
+                    self.page = self.context.new_page()
 
-                    if self.check_session_validity(self.context):
-                        self.page = self.context.new_page()
-
+                    if self.check_login_status(self.context):
                         duration = time.time() - start_time
                         log_performance("session_restore", duration, email=email)
 
@@ -199,81 +231,200 @@ class SalesforceAuth:
             self.page.goto("https://trailhead.salesforce.com/", timeout=30000)
             self.page.wait_for_load_state("networkidle", timeout=10000)
 
-            # Click login button
-            login_button_selectors = [
-                "[data-testid='login-button']",
-                ".login-button",
-                "a[href*='login']",
-                "button:has-text('Log In')",
-                "a:has-text('Log In')",
-            ]
+            # Check if already logged in
+            if self.check_login_status(self.context):
+                self.logger.info("Already logged in, no need for login process")
+                duration = time.time() - start_time
+                log_performance("login_skip", duration, email=email)
 
-            login_clicked = False
-            for selector in login_button_selectors:
-                try:
-                    element = self.page.locator(selector).first
-                    if element.is_visible():
-                        self.logger.info(f"Found login button: {selector}")
-                        element.click()
-                        login_clicked = True
-                        break
-                except:
-                    continue
+                self.logger.end_operation("login", success=True, session_restored=False)
+                return LoginResult(
+                    browser_context=self.context,
+                    page=self.page,
+                    session_restored=False,
+                    is_logged_in=True,
+                )
 
-            if not login_clicked:
-                raise Exception("Could not find login button")
-
-            # Wait for login form
+            # Navigate directly to login URL instead of clicking button
+            self.logger.info("Navigating directly to login URL...")
+            self.page.goto(
+                "https://trailhead.salesforce.com/sessions/users/new?type=tbidlogin",
+                timeout=30000,
+            )
             self.page.wait_for_load_state("networkidle", timeout=10000)
+
+            # Wait a bit more for any dynamic content
+            time.sleep(3)
 
             # Enter email
             email_input_selectors = [
+                "#field",  # Specific ID from the login form
                 "input[type='email']",
                 "input[name='email']",
-                "input[data-testid='email-input']",
+                "input[name='username']",
+                "#username",
                 "#email",
             ]
 
             email_entered = False
             for selector in email_input_selectors:
                 try:
-                    element = self.page.locator(selector).first
-                    if element.is_visible():
-                        self.logger.info(f"Found email input: {selector}")
-                        element.fill(email)
-                        email_entered = True
+                    elements = self.page.locator(selector).all()
+                    self.logger.info(
+                        f"Found {len(elements)} elements for selector: {selector}"
+                    )
+
+                    for i, element in enumerate(elements):
+                        if element.is_visible():
+                            self.logger.info(
+                                f"Found visible email input: {selector} (element {i})"
+                            )
+                            element.fill(email)
+                            email_entered = True
+                            break
+
+                    if email_entered:
                         break
-                except:
+                except Exception as e:
+                    self.logger.debug(f"Error with selector {selector}: {e}")
                     continue
 
             if not email_entered:
+                # Debug: Log all input elements on the page
+                all_inputs = self.page.locator("input").all()
+                self.logger.error(
+                    f"No email input found. Total inputs on page: {len(all_inputs)}"
+                )
+                for i, inp in enumerate(all_inputs):
+                    try:
+                        input_type = inp.get_attribute("type") or "text"
+                        input_name = inp.get_attribute("name") or "no-name"
+                        input_id = inp.get_attribute("id") or "no-id"
+                        is_visible = inp.is_visible()
+                        self.logger.error(
+                            f"Input {i}: type={input_type}, name={input_name}, id={input_id}, visible={is_visible}"
+                        )
+                    except:
+                        pass
                 raise Exception("Could not find email input field")
 
             # Submit email form
             submit_selectors = [
+                "button[type='submit'][part='button']",  # Specific Trailhead submit button
                 "button[type='submit']",
                 "input[type='submit']",
-                "button:has-text('Continue')",
-                "button:has-text('Next')",
+                "button:has-text('Log In')",
+                "button:has-text('Sign In')",
+                ".login-submit",
             ]
 
             submitted = False
             for selector in submit_selectors:
                 try:
-                    element = self.page.locator(selector).first
-                    if element.is_visible():
-                        self.logger.info(f"Found submit button: {selector}")
-                        element.click()
-                        submitted = True
+                    elements = self.page.locator(selector).all()
+                    self.logger.info(
+                        f"Found {len(elements)} elements for submit selector: {selector}"
+                    )
+
+                    for i, element in enumerate(elements):
+                        try:
+                            if element.is_visible():
+                                self.logger.info(
+                                    f"Found visible submit button: {selector} (element {i})"
+                                )
+
+                                # Wait for any loading states to clear
+                                try:
+                                    self.page.wait_for_selector(
+                                        "lwc-idx-loading", state="hidden", timeout=10000
+                                    )
+                                except:
+                                    pass  # Loading element might not exist
+
+                                # Try multiple click strategies
+                                try:
+                                    # Strategy 1: Force click
+                                    element.click(force=True)
+                                    self.logger.info("Force click successful")
+                                    submitted = True
+                                    break
+                                except Exception as e1:
+                                    self.logger.debug(f"Force click failed: {e1}")
+                                    try:
+                                        # Strategy 2: Click with timeout
+                                        element.click(timeout=10000)
+                                        self.logger.info("Regular click successful")
+                                        submitted = True
+                                        break
+                                    except Exception as e2:
+                                        self.logger.debug(f"Regular click failed: {e2}")
+                                        try:
+                                            # Strategy 3: JavaScript click
+                                            self.page.evaluate(
+                                                "arguments[0].click();", element
+                                            )
+                                            self.logger.info(
+                                                "JavaScript click successful"
+                                            )
+                                            submitted = True
+                                            break
+                                        except Exception as e3:
+                                            self.logger.debug(
+                                                f"JavaScript click failed: {e3}"
+                                            )
+                                            # Strategy 4: Try clicking the span inside the button
+                                            try:
+                                                span_element = element.locator(
+                                                    "span"
+                                                ).first
+                                                if span_element.is_visible():
+                                                    span_element.click(force=True)
+                                                    self.logger.info(
+                                                        "Span click successful"
+                                                    )
+                                                    submitted = True
+                                                    break
+                                                else:
+                                                    raise Exception("Span not visible")
+                                            except Exception as e4:
+                                                self.logger.debug(
+                                                    f"All click strategies failed: {e4}"
+                                                )
+                                                continue
+                        except Exception as e:
+                            self.logger.debug(f"Error with submit element {i}: {e}")
+                            continue
+
+                    if submitted:
                         break
-                except:
+                except Exception as e:
+                    self.logger.debug(f"Error with submit selector {selector}: {e}")
                     continue
 
             if not submitted:
+                # Debug: Log all button elements on the page
+                all_buttons = self.page.locator(
+                    "button, input[type='submit'], lwc-wes-button"
+                ).all()
+                self.logger.error(
+                    f"No submit button found. Total buttons on page: {len(all_buttons)}"
+                )
+                for i, btn in enumerate(all_buttons):
+                    try:
+                        button_text = btn.text_content() or "no-text"
+                        button_type = btn.get_attribute("type") or "no-type"
+                        button_tag = btn.evaluate("el => el.tagName.toLowerCase()")
+                        is_visible = btn.is_visible()
+                        self.logger.error(
+                            f"Button {i}: tag={button_tag}, text='{button_text}', type={button_type}, visible={is_visible}"
+                        )
+                    except:
+                        pass
                 raise Exception("Could not find submit button")
 
             # Wait for verification code page
             self.page.wait_for_load_state("networkidle", timeout=10000)
+            time.sleep(3)  # Wait for any redirects and page transitions
 
             # Check for reCAPTCHA
             if self._check_for_recaptcha():
@@ -291,10 +442,21 @@ class SalesforceAuth:
 
             # Enter verification code
             code_input_selectors = [
+                "#field",  # Specific ID from the verification form
+                "input[name='otp']",  # OTP field name
                 "input[type='text']",
+                "input[type='number']",
+                "input[type='tel']",
                 "input[name='code']",
-                "input[data-testid='verification-code']",
-                "#verificationCode",
+                "input[name='verification']",
+                "input[placeholder*='code']",
+                "input[placeholder*='verification']",
+                "input[placeholder*='OTP']",
+                "#code",
+                "#verification",
+                "#otp",
+                "[data-testid*='code']",
+                "[data-testid*='verification']",
             ]
 
             code_entered = False
@@ -309,28 +471,98 @@ class SalesforceAuth:
                 except:
                     continue
 
+            # If no specific field found, try to find any input that could accept a code
+            if not code_entered:
+                self.logger.info(
+                    "No specific verification field found, looking for any suitable input..."
+                )
+                all_inputs = self.page.locator("input").all()
+                for input_elem in all_inputs:
+                    try:
+                        if input_elem.is_visible():
+                            input_type = input_elem.get_attribute("type") or "text"
+                            # Look for text, number, or tel inputs that are visible
+                            if input_type in ["text", "number", "tel"]:
+                                self.logger.info(
+                                    f"Using fallback input field with type: {input_type}"
+                                )
+                                input_elem.fill(verification_code)
+                                code_entered = True
+                                break
+                    except:
+                        continue
+
             if not code_entered:
                 raise Exception("Could not find verification code input field")
 
             # Submit verification code
-            submit_selectors = [
+            verify_selectors = [
+                "lwc-wes-button",  # Specific Trailhead custom button
+                "lwc-wes-button:has-text('Submit code')",  # Button with specific text
+                "button[type='submit'][part='button']",  # Specific Trailhead button
                 "button[type='submit']",
-                "input[type='submit']",
                 "button:has-text('Verify')",
                 "button:has-text('Submit')",
+                "button:has-text('Submit code')",
+                "button:has-text('Continue')",
+                ".verify-button",
             ]
 
             submitted = False
-            for selector in submit_selectors:
+            for selector in verify_selectors:
                 try:
                     element = self.page.locator(selector).first
                     if element.is_visible():
-                        self.logger.info(
-                            f"Found verification submit button: {selector}"
-                        )
-                        element.click()
-                        submitted = True
-                        break
+                        self.logger.info(f"Found verify button: {selector}")
+
+                        # Wait for any loading states to clear
+                        try:
+                            self.page.wait_for_selector(
+                                "lwc-idx-loading", state="hidden", timeout=10000
+                            )
+                        except:
+                            pass  # Loading element might not exist
+
+                        # Try multiple click strategies
+                        try:
+                            # Strategy 1: Force click
+                            element.click(force=True)
+                            self.logger.info("Force click successful")
+                            submitted = True
+                            break
+                        except Exception as e1:
+                            self.logger.debug(f"Force click failed: {e1}")
+                            try:
+                                # Strategy 2: Click with timeout
+                                element.click(timeout=10000)
+                                self.logger.info("Regular click successful")
+                                submitted = True
+                                break
+                            except Exception as e2:
+                                self.logger.debug(f"Regular click failed: {e2}")
+                                try:
+                                    # Strategy 3: JavaScript click
+                                    self.page.evaluate("arguments[0].click();", element)
+                                    self.logger.info("JavaScript click successful")
+                                    submitted = True
+                                    break
+                                except Exception as e3:
+                                    self.logger.debug(f"JavaScript click failed: {e3}")
+                                    # Strategy 4: Try clicking the span inside the button
+                                    try:
+                                        span_element = element.locator("span").first
+                                        if span_element.is_visible():
+                                            span_element.click(force=True)
+                                            self.logger.info("Span click successful")
+                                            submitted = True
+                                            break
+                                        else:
+                                            raise Exception("Span not visible")
+                                    except Exception as e4:
+                                        self.logger.debug(
+                                            f"All click strategies failed: {e4}"
+                                        )
+                                        continue
                 except:
                     continue
 
@@ -339,9 +571,10 @@ class SalesforceAuth:
 
             # Wait for login to complete
             self.page.wait_for_load_state("networkidle", timeout=30000)
+            time.sleep(3)  # Additional wait for any redirects
 
             # Verify login success
-            if self.check_session_validity(self.context):
+            if self.check_login_status(self.context):
                 self.logger.info("Login completed successfully!")
 
                 # Save session

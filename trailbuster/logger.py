@@ -26,6 +26,18 @@ from colorama import Fore, Back, Style
 colorama.init(autoreset=True)
 
 
+class MockJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles Mock objects and other non-serializable types."""
+
+    def default(self, obj):
+        if hasattr(obj, "__class__") and "Mock" in obj.__class__.__name__:
+            return f"<Mock: {obj.__class__.__name__}>"
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
+
+
 class ColoredFormatter(logging.Formatter):
     """Custom formatter with colors and emojis for console output."""
 
@@ -103,11 +115,11 @@ class JSONFormatter(logging.Formatter):
             "line": record.lineno,
         }
 
-        # Add extra fields if present
+        # Add extra data if present
         if hasattr(record, "extra_data"):
-            log_entry.update(record.extra_data)
+            log_entry["extra_data"] = record.extra_data
 
-        return json.dumps(log_entry)
+        return json.dumps(log_entry, cls=MockJSONEncoder)
 
 
 class ProgressTracker:

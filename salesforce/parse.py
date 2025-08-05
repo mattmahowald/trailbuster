@@ -491,6 +491,7 @@ def _extract_description(page: Page) -> str:
 def _extract_lessons_list(page: Page) -> List[Dict[str, str]]:
     """Extract list of lessons from module page."""
     lessons = []
+    seen_urls = set()  # Track seen URLs to avoid duplicates
 
     # Look for lesson links
     lesson_selectors = [
@@ -513,8 +514,18 @@ def _extract_lessons_list(page: Page) -> List[Dict[str, str]]:
                         if href.startswith("/"):
                             href = f"https://trailhead.salesforce.com{href}"
 
-                        lessons.append({"title": text, "url": href})
+                        # Skip if we've already seen this URL
+                        if href in seen_urls:
+                            continue
 
+                        # Skip generic titles like "Start", "Incomplete", etc.
+                        if text.lower() in ["start", "incomplete", "complete"]:
+                            continue
+
+                        lessons.append({"title": text, "url": href})
+                        seen_urls.add(href)
+
+                # If we found lessons with this selector, don't try others
                 if lessons:
                     break
         except:

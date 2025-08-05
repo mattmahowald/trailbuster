@@ -7,13 +7,13 @@ Main entry point for crawling Trailhead modules, lessons, and trails.
 
 import os
 import sys
-from typing import Dict, List
+from typing import Optional
 
 import dotenv
 
 from salesforce.auth import SalesforceAuth
-from trailbuster.logger import setup_logging, get_logger, log_main, log_performance
-from crawl import TrailheadCrawler
+from salesforce.crawl import TrailheadCrawler
+from trailbuster.logger import get_logger, log_main, setup_logging
 
 # Default module URL for testing
 DEFAULT_MODULE_URL = (
@@ -37,8 +37,9 @@ def print_crawl_summary(crawl_data: dict) -> None:
     if lessons:
         log_main("Lesson details:")
         for i, lesson in enumerate(lessons, 1):
-            log_main(
-                f"  {i}. {lesson.get('title', 'N/A')}",
+            log_main(f"  {i}. {lesson.get('title', 'N/A')}")
+            logger.info(
+                "Lesson details",
                 {
                     "content_items": len(lesson.get("content", [])),
                     "learning_objectives": len(lesson.get("learning_objectives", [])),
@@ -69,6 +70,9 @@ def handle_module_crawl(
                 logger.error(f"Login failed: {result.error}")
                 logger.end_operation("module_crawl", success=False, error=result.error)
                 return
+
+            # Use the page from the login result
+            auth.page = result.page
 
             # Crawl the specified module
             log_main("Starting comprehensive crawl of module...")
@@ -113,6 +117,9 @@ def handle_trail_crawl(
                 logger.error(f"Login failed: {result.error}")
                 logger.end_operation("trail_crawl", success=False, error=result.error)
                 return
+
+            # Use the page from the login result
+            auth.page = result.page
 
             # Crawl the trail
             log_main("Starting comprehensive crawl of trail...")
@@ -169,6 +176,9 @@ def handle_batch_crawl(
                 logger.error(f"Login failed: {result.error}")
                 logger.end_operation("batch_crawl", success=False, error=result.error)
                 return
+
+            # Use the page from the login result
+            auth.page = result.page
 
             # Crawl URLs from file
             log_main(f"Starting batch crawl from {urls_file}...")
