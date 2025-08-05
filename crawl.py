@@ -2,528 +2,516 @@ import json
 import os
 import sys
 import time
-from typing import Dict, Any, List, Optional, Set
-from urllib.parse import urljoin, urlparse
-import dotenv
 from dataclasses import asdict
+from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urljoin, urlparse
 
-from salesforce.auth import SalesforceAuth, LoginResult
-from salesforce.parse import parse_lesson, parse_module, LessonContent, ModuleContent
+import dotenv
+
+from salesforce.auth import LoginResult, SalesforceAuth
+from salesforce.parse import LessonContent, ModuleContent, parse_lesson, parse_module
+from trailbuster.logger import get_logger, log_crawler, log_performance, ProgressTracker
 
 
 class TrailheadCrawler:
     """Crawls Trailhead modules and lessons to extract content for LLM processing."""
-    
+
     def __init__(self, output_dir: str = "crawled_data"):
         self.output_dir = output_dir
         self.visited_urls: Set[str] = set()
         self.failed_urls: Set[str] = set()
-        
+        self.logger = get_logger("CRAWLER")
+
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Load existing progress if available
         self._load_progress()
-    
-    def crawl_module(self, module_url: str, auth: SalesforceAuth) -> Optional[Dict[str, Any]]:
+
+    def crawl_module(
+        self, module_url: str, auth: SalesforceAuth
+    ) -> Optional[Dict[str, Any]]:
         """
         Crawl a single module and all its lessons.
-        
+
         Args:
             module_url: URL of the module to crawl
             auth: Authenticated SalesforceAuth instance
-            
+
         Returns:
             Dictionary containing module and lesson data
         """
+        self.logger.start_operation("module_crawl", module_url=module_url)
+
         if module_url in self.visited_urls:
-            print(f"⏭️  Skipping already visited: {module_url}")
+            self.logger.info(f"Skipping already visited: {module_url}")
             return self._load_existing_data(module_url)
-        
+
         try:
-            print(f"🔍 Crawling module: {module_url}")
-            
+            self.logger.info(f"Crawling module: {module_url}")
+
             # Navigate to module page
             page = auth.get_page()
             self._navigate_with_retry(page, module_url)
-            
+
             # Parse module overview
             module_content = parse_module(page)
-            print(f"📚 Found module: {module_content.title}")
-            print(f"📄 Description: {module_content.description[:100]}...")
-            print(f"📝 Found {len(module_content.lessons)} lessons")
-            
+            self.logger.info(f"Found module: {module_content.title}")
+            self.logger.info(f"Description: {module_content.description[:100]}...")
+            self.logger.info(f"Found {len(module_content.lessons)} lessons")
+
             # Crawl each lesson
             lesson_data = []
+            progress = ProgressTracker(len(module_content.lessons), "Crawling lessons")
+
             for i, lesson in enumerate(module_content.lessons, 1):
-                print(f"\n📖 Crawling lesson {i}/{len(module_content.lessons)}: {lesson['title']}")
-                
+                lesson_title = lesson["title"]
+                self.logger.info(
+                    f"Crawling lesson {i}/{len(module_content.lessons)}: {lesson_title}"
+                )
+
                 try:
-                    lesson_url = lesson['url']
+                    lesson_url = lesson["url"]
                     if lesson_url not in self.visited_urls:
                         self._navigate_with_retry(page, lesson_url)
                         lesson_content = parse_lesson(page)
-                        
+
                         lesson_dict = asdict(lesson_content)
                         lesson_data.append(lesson_dict)
-                        
-                        print(f"  ✅ Content items: {len(lesson_content.content)}")
-                        print(f"  ✅ Learning objectives: {len(lesson_content.learning_objectives)}")
-                        print(f"  ✅ Instructions: {len(lesson_content.instructions)}")
-                        print(f"  ✅ Links: {len(lesson_content.links)}")
-                        
+
+                        self.logger.info(
+                            f"Lesson completed: {lesson_title}",
+                            {
+                                "content_items": len(lesson_content.content),
+                                "learning_objectives": len(
+                                    lesson_content.learning_objectives
+                                ),
+                                "instructions": len(lesson_content.instructions),
+                                "links": len(lesson_content.links),
+                                "url": lesson_url,
+                            },
+                        )
+
                         self.visited_urls.add(lesson_url)
-                        
+                        progress.update(1, f"Completed: {lesson_title}")
+
                         # Small delay between lessons
                         time.sleep(2)
                     else:
-                        print(f"  ⏭️  Already visited: {lesson['title']}")
+                        self.logger.info(f"Already visited: {lesson_title}")
                         existing_lesson = self._load_existing_lesson_data(lesson_url)
                         if existing_lesson:
                             lesson_data.append(existing_lesson)
-                            
+                        progress.update(1, f"Skipped: {lesson_title}")
+
                 except Exception as e:
-                    print(f"  ❌ Failed to crawl lesson {lesson['title']}: {e}")
-                    self.failed_urls.add(lesson.get('url', ''))
+                    self.logger.error(f"Failed to crawl lesson {lesson_title}: {e}")
+                    self.failed_urls.add(lesson.get("url", ""))
+                    progress.update(1, f"Failed: {lesson_title}")
                     continue
-            
+
             # Compile final data
             crawl_result = {
-                'module': asdict(module_content),
-                'lessons': lesson_data,
-                'crawl_timestamp': time.time(),
-                'crawl_date': time.strftime('%Y-%m-%d %H:%M:%S')
+                "module": asdict(module_content),
+                "lessons": lesson_data,
+                "crawl_timestamp": time.time(),
+                "total_lessons": len(module_content.lessons),
+                "successful_lessons": len(lesson_data),
+                "failed_lessons": len(self.failed_urls),
             }
-            
-            # Save data
+
+            # Save the data
             self._save_module_data(module_url, crawl_result)
             self.visited_urls.add(module_url)
             self._save_progress()
-            
-            print(f"✅ Module crawl complete: {len(lesson_data)} lessons processed")
+
+            self.logger.end_operation(
+                "module_crawl", success=True, crawl_result=crawl_result
+            )
             return crawl_result
-            
+
         except Exception as e:
-            print(f"❌ Failed to crawl module {module_url}: {e}")
-            self.failed_urls.add(module_url)
+            self.logger.error(f"Failed to crawl module {module_url}: {e}")
+            self.logger.end_operation("module_crawl", success=False, error=str(e))
             return None
-    
+
     def crawl_trail(self, trail_url: str, auth: SalesforceAuth) -> Dict[str, Any]:
         """
-        Crawl an entire trail (collection of modules).
-        
+        Crawl an entire trail and all its modules.
+
         Args:
             trail_url: URL of the trail to crawl
             auth: Authenticated SalesforceAuth instance
-            
+
         Returns:
-            Dictionary containing trail and all module data
+            Dictionary containing trail and module data
         """
+        self.logger.start_operation("trail_crawl", trail_url=trail_url)
+
+        if trail_url in self.visited_urls:
+            self.logger.info(f"Skipping already visited trail: {trail_url}")
+            return self._load_existing_data(trail_url)
+
         try:
-            print(f"🛤️  Crawling trail: {trail_url}")
-            
+            self.logger.info(f"Crawling trail: {trail_url}")
+
+            # Navigate to trail page
             page = auth.get_page()
             self._navigate_with_retry(page, trail_url)
-            
-            # Extract trail information and module links
+
+            # Extract trail information
             trail_info = self._extract_trail_info(page)
-            print(f"🛤️  Trail: {trail_info['title']}")
-            print(f"📚 Found {len(trail_info['modules'])} modules")
-            
-            # Crawl each module in the trail
-            modules_data = []
-            for i, module in enumerate(trail_info['modules'], 1):
-                print(f"\n📚 Processing module {i}/{len(trail_info['modules'])}: {module['title']}")
-                
-                module_data = self.crawl_module(module['url'], auth)
-                if module_data:
-                    modules_data.append(module_data)
-                
-                # Longer delay between modules
-                time.sleep(5)
-            
+            self.logger.info(f"Found trail: {trail_info.get('title', 'N/A')}")
+
+            # Get module URLs from trail
+            module_elements = page.locator(
+                "[data-testid='module-card'], .module-card, .trail-module"
+            ).all()
+            module_urls = []
+
+            for element in module_elements:
+                try:
+                    link = element.locator("a[href]").first
+                    href = link.get_attribute("href")
+                    if href and "modules" in href:
+                        if href.startswith("/"):
+                            href = f"https://trailhead.salesforce.com{href}"
+                        module_urls.append(href)
+                except:
+                    continue
+
+            self.logger.info(f"Found {len(module_urls)} modules in trail")
+
+            # Crawl each module
+            module_data = []
+            progress = ProgressTracker(len(module_urls), "Crawling trail modules")
+
+            for i, module_url in enumerate(module_urls, 1):
+                self.logger.info(
+                    f"Crawling module {i}/{len(module_urls)}: {module_url}"
+                )
+
+                try:
+                    module_result = self.crawl_module(module_url, auth)
+                    if module_result:
+                        module_data.append(module_result)
+                        progress.update(1, f"Completed module {i}")
+                    else:
+                        progress.update(1, f"Failed module {i}")
+                except Exception as e:
+                    self.logger.error(f"Failed to crawl module {module_url}: {e}")
+                    progress.update(1, f"Failed module {i}")
+                    continue
+
             # Compile trail data
             trail_result = {
-                'trail': trail_info,
-                'modules': modules_data,
-                'crawl_timestamp': time.time(),
-                'crawl_date': time.strftime('%Y-%m-%d %H:%M:%S')
+                "trail": trail_info,
+                "modules": module_data,
+                "crawl_timestamp": time.time(),
+                "total_modules": len(module_urls),
+                "successful_modules": len(module_data),
+                "failed_modules": len(module_urls) - len(module_data),
             }
-            
-            # Save trail data
+
+            # Save the data
             self._save_trail_data(trail_url, trail_result)
-            
-            print(f"🎉 Trail crawl complete: {len(modules_data)} modules processed")
+            self.visited_urls.add(trail_url)
+            self._save_progress()
+
+            self.logger.end_operation(
+                "trail_crawl", success=True, trail_result=trail_result
+            )
             return trail_result
-            
+
         except Exception as e:
-            print(f"❌ Failed to crawl trail {trail_url}: {e}")
-            return {'error': str(e)}
-    
-    def crawl_urls_from_file(self, urls_file: str, auth: SalesforceAuth) -> Dict[str, Any]:
+            self.logger.error(f"Failed to crawl trail {trail_url}: {e}")
+            self.logger.end_operation("trail_crawl", success=False, error=str(e))
+            return {"error": str(e)}
+
+    def crawl_urls_from_file(
+        self, urls_file: str, auth: SalesforceAuth
+    ) -> Dict[str, Any]:
         """
-        Crawl multiple URLs from a file.
-        
+        Crawl URLs from a file.
+
         Args:
-            urls_file: Path to file containing URLs (one per line)
+            urls_file: Path to file containing URLs
             auth: Authenticated SalesforceAuth instance
-            
+
         Returns:
-            Dictionary containing results for all URLs
+            Dictionary containing crawl results
         """
+        self.logger.start_operation("batch_crawl", urls_file=urls_file)
+
         try:
-            with open(urls_file, 'r') as f:
-                urls = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-            
-            print(f"📋 Found {len(urls)} URLs to crawl")
-            
+            with open(urls_file, "r") as f:
+                urls = [
+                    line.strip()
+                    for line in f
+                    if line.strip() and not line.startswith("#")
+                ]
+
+            self.logger.info(f"Loaded {len(urls)} URLs from {urls_file}")
+
             results = {}
+            progress = ProgressTracker(len(urls), "Batch crawling URLs")
+
             for i, url in enumerate(urls, 1):
-                print(f"\n📊 Processing URL {i}/{len(urls)}: {url}")
-                
-                if 'trails' in url:
-                    result = self.crawl_trail(url, auth)
+                self.logger.info(f"Processing URL {i}/{len(urls)}: {url}")
+
+                try:
+                    if "trails" in url:
+                        result = self.crawl_trail(url, auth)
+                    else:
+                        result = self.crawl_module(url, auth)
+
                     results[url] = result
-                elif 'modules' in url:
-                    result = self.crawl_module(url, auth)
-                    results[url] = result
-                else:
-                    print(f"⚠️  Unknown URL type, treating as module: {url}")
-                    result = self.crawl_module(url, auth)
-                    results[url] = result
-                
-                # Delay between different URLs
-                time.sleep(10)
-            
-            # Save consolidated results
+                    progress.update(1, f"Completed URL {i}")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to crawl URL {url}: {e}")
+                    results[url] = {"error": str(e)}
+                    progress.update(1, f"Failed URL {i}")
+
+            # Save batch results
             self._save_batch_results(results)
-            
+
+            self.logger.end_operation("batch_crawl", success=True, results=results)
             return results
-            
+
         except Exception as e:
-            print(f"❌ Failed to process URLs file: {e}")
-            return {'error': str(e)}
-    
+            self.logger.error(f"Failed to process URLs file {urls_file}: {e}")
+            self.logger.end_operation("batch_crawl", success=False, error=str(e))
+            return {"error": str(e)}
+
     def _navigate_with_retry(self, page, url: str, max_retries: int = 3) -> None:
         """Navigate to URL with retry logic."""
+        start_time = time.time()
+
         for attempt in range(max_retries):
             try:
-                print(f"🔗 Navigating to: {url} (attempt {attempt + 1})")
-                page.goto(url, timeout=60000)
-                
-                try:
-                    page.wait_for_load_state("networkidle", timeout=30000)
-                except:
-                    page.wait_for_load_state("domcontentloaded", timeout=10000)
-                
-                time.sleep(3)  # Wait for dynamic content
-                return
-                
+                self.logger.debug(
+                    f"Navigation attempt {attempt + 1}/{max_retries} to {url}"
+                )
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                break
             except Exception as e:
-                print(f"❌ Navigation attempt {attempt + 1} failed: {e}")
+                self.logger.warning(f"Navigation attempt {attempt + 1} failed: {e}")
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    print(f"⏰ Waiting {wait_time}s before retry...")
+                    wait_time = 2**attempt
+                    self.logger.debug(f"Waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
                 else:
-                    raise
-    
+                    raise e
+
+        duration = time.time() - start_time
+        log_performance("page_navigation", duration, url=url, attempts=attempt + 1)
+
     def _extract_trail_info(self, page) -> Dict[str, Any]:
-        """Extract trail information and module links."""
-        # Extract trail title
-        title_selectors = [
-            "h1",
-            "[data-testid='trail-title']",
-            ".trail-title"
-        ]
-        
-        title = "Unknown Trail"
-        for selector in title_selectors:
-            try:
-                element = page.locator(selector).first
-                if element.is_visible():
-                    title = element.text_content().strip()
-                    break
-            except:
-                continue
-        
-        # Extract description
-        desc_selectors = [
-            "[data-testid='trail-description']",
-            ".trail-description",
-            ".description",
-            "p:first-of-type"
-        ]
-        
-        description = ""
-        for selector in desc_selectors:
-            try:
-                element = page.locator(selector).first
-                if element.is_visible():
-                    description = element.text_content().strip()
-                    if len(description) > 20:
+        """Extract trail information from the page."""
+        try:
+            # Extract title
+            title_selectors = [
+                "[data-testid='trail-title']",
+                ".trail-title",
+                "h1",
+                ".trail-header h1",
+            ]
+
+            title = "Unknown Trail"
+            for selector in title_selectors:
+                try:
+                    element = page.locator(selector).first
+                    if element.is_visible():
+                        title = element.text_content().strip()
                         break
-            except:
-                continue
-        
-        # Extract module links
-        module_selectors = [
-            ".trail-modules a",
-            ".modules-list a",
-            ".module-list a",
-            "[data-testid='module-link']"
-        ]
-        
-        modules = []
-        for selector in module_selectors:
-            try:
-                elements = page.locator(selector).all()
-                if elements:
-                    for elem in elements:
-                        href = elem.get_attribute("href")
-                        text = elem.text_content().strip()
-                        
-                        if href and text and 'modules' in href:
-                            if href.startswith('/'):
-                                href = f"https://trailhead.salesforce.com{href}"
-                            
-                            modules.append({
-                                'title': text,
-                                'url': href
-                            })
-                    
-                    if modules:
+                except:
+                    continue
+
+            # Extract description
+            description_selectors = [
+                "[data-testid='trail-description']",
+                ".trail-description",
+                ".trail-intro",
+                "p:first-of-type",
+            ]
+
+            description = "No description available"
+            for selector in description_selectors:
+                try:
+                    element = page.locator(selector).first
+                    if element.is_visible():
+                        description = element.text_content().strip()
                         break
-            except:
-                continue
-        
-        return {
-            'title': title,
-            'description': description,
-            'url': page.url,
-            'modules': modules
-        }
-    
+                except:
+                    continue
+
+            return {
+                "title": title,
+                "description": description,
+                "url": page.url,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error extracting trail info: {e}")
+            return {
+                "title": "Unknown Trail",
+                "description": "Error extracting description",
+                "url": page.url,
+            }
+
     def _save_module_data(self, module_url: str, data: Dict[str, Any]) -> None:
         """Save module data to file."""
-        # Create filename from URL
-        parsed_url = urlparse(module_url)
-        filename = parsed_url.path.replace('/', '_').replace('-', '_') + '.json'
-        filepath = os.path.join(self.output_dir, 'modules', filename)
-        
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        print(f"💾 Saved module data: {filepath}")
-    
+        try:
+            filename = f"module_{hash(module_url)}.json"
+            filepath = os.path.join(self.output_dir, filename)
+
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+
+            self.logger.debug(f"Saved module data to {filepath}")
+        except Exception as e:
+            self.logger.error(f"Error saving module data: {e}")
+
     def _save_trail_data(self, trail_url: str, data: Dict[str, Any]) -> None:
         """Save trail data to file."""
-        # Create filename from URL
-        parsed_url = urlparse(trail_url)
-        filename = parsed_url.path.replace('/', '_').replace('-', '_') + '.json'
-        filepath = os.path.join(self.output_dir, 'trails', filename)
-        
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        
-        print(f"💾 Saved trail data: {filepath}")
-    
+        try:
+            filename = f"trail_{hash(trail_url)}.json"
+            filepath = os.path.join(self.output_dir, filename)
+
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+
+            self.logger.debug(f"Saved trail data to {filepath}")
+        except Exception as e:
+            self.logger.error(f"Error saving trail data: {e}")
+
     def _save_batch_results(self, results: Dict[str, Any]) -> None:
-        """Save batch processing results."""
-        timestamp = int(time.time())
-        filename = f"batch_results_{timestamp}.json"
-        filepath = os.path.join(self.output_dir, filename)
-        
-        with open(filepath, 'w') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        
-        print(f"💾 Saved batch results: {filepath}")
-    
+        """Save batch crawl results to file."""
+        try:
+            timestamp = int(time.time())
+            filename = f"batch_results_{timestamp}.json"
+            filepath = os.path.join(self.output_dir, filename)
+
+            with open(filepath, "w") as f:
+                json.dump(results, f, indent=2)
+
+            self.logger.debug(f"Saved batch results to {filepath}")
+        except Exception as e:
+            self.logger.error(f"Error saving batch results: {e}")
+
     def _save_progress(self) -> None:
-        """Save crawling progress."""
-        progress = {
-            'visited_urls': list(self.visited_urls),
-            'failed_urls': list(self.failed_urls),
-            'last_updated': time.time()
-        }
-        
-        filepath = os.path.join(self.output_dir, 'progress.json')
-        with open(filepath, 'w') as f:
-            json.dump(progress, f, indent=2)
-    
+        """Save progress to file."""
+        try:
+            progress_data = {
+                "visited_urls": list(self.visited_urls),
+                "failed_urls": list(self.failed_urls),
+                "timestamp": time.time(),
+            }
+
+            progress_file = os.path.join(self.output_dir, "progress.json")
+            with open(progress_file, "w") as f:
+                json.dump(progress_data, f, indent=2)
+
+            self.logger.debug(f"Saved progress to {progress_file}")
+        except Exception as e:
+            self.logger.error(f"Error saving progress: {e}")
+
     def _load_progress(self) -> None:
-        """Load existing crawling progress."""
-        filepath = os.path.join(self.output_dir, 'progress.json')
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r') as f:
-                    progress = json.load(f)
-                
-                self.visited_urls = set(progress.get('visited_urls', []))
-                self.failed_urls = set(progress.get('failed_urls', []))
-                
-                print(f"📊 Loaded progress: {len(self.visited_urls)} visited, {len(self.failed_urls)} failed")
-            except Exception as e:
-                print(f"⚠️  Failed to load progress: {e}")
-    
+        """Load progress from file."""
+        try:
+            progress_file = os.path.join(self.output_dir, "progress.json")
+            if os.path.exists(progress_file):
+                with open(progress_file, "r") as f:
+                    progress_data = json.load(f)
+
+                self.visited_urls = set(progress_data.get("visited_urls", []))
+                self.failed_urls = set(progress_data.get("failed_urls", []))
+
+                self.logger.info(
+                    f"Loaded progress: {len(self.visited_urls)} visited URLs, {len(self.failed_urls)} failed URLs"
+                )
+        except Exception as e:
+            self.logger.warning(f"Error loading progress: {e}")
+
     def _load_existing_data(self, url: str) -> Optional[Dict[str, Any]]:
         """Load existing data for a URL."""
-        parsed_url = urlparse(url)
-        filename = parsed_url.path.replace('/', '_').replace('-', '_') + '.json'
-        
-        # Try modules directory first
-        filepath = os.path.join(self.output_dir, 'modules', filename)
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r') as f:
+        try:
+            filename = (
+                f"module_{hash(url)}.json"
+                if "modules" in url
+                else f"trail_{hash(url)}.json"
+            )
+            filepath = os.path.join(self.output_dir, filename)
+
+            if os.path.exists(filepath):
+                with open(filepath, "r") as f:
                     return json.load(f)
-            except:
-                pass
-        
-        # Try trails directory
-        filepath = os.path.join(self.output_dir, 'trails', filename)
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
-        
+        except Exception as e:
+            self.logger.error(f"Error loading existing data: {e}")
+
         return None
-    
+
     def _load_existing_lesson_data(self, lesson_url: str) -> Optional[Dict[str, Any]]:
-        """Load existing lesson data from module files."""
-        # This is a simplified approach - in practice, you might want to index lessons separately
-        for root, dirs, files in os.walk(os.path.join(self.output_dir, 'modules')):
-            for file in files:
-                if file.endswith('.json'):
-                    try:
-                        filepath = os.path.join(root, file)
-                        with open(filepath, 'r') as f:
-                            data = json.load(f)
-                        
-                        # Check if this module contains the lesson
-                        for lesson in data.get('lessons', []):
-                            if lesson.get('url') == lesson_url:
-                                return lesson
-                    except:
-                        continue
-        
+        """Load existing lesson data."""
+        try:
+            # Look for lesson data in module files
+            for filename in os.listdir(self.output_dir):
+                if filename.startswith("module_") and filename.endswith(".json"):
+                    filepath = os.path.join(self.output_dir, filename)
+                    with open(filepath, "r") as f:
+                        data = json.load(f)
+
+                    lessons = data.get("lessons", [])
+                    for lesson in lessons:
+                        if lesson.get("url") == lesson_url:
+                            return lesson
+        except Exception as e:
+            self.logger.error(f"Error loading existing lesson data: {e}")
+
         return None
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get crawling statistics."""
-        return {
-            'visited_urls': len(self.visited_urls),
-            'failed_urls': len(self.failed_urls),
-            'success_rate': len(self.visited_urls) / (len(self.visited_urls) + len(self.failed_urls)) * 100 if (len(self.visited_urls) + len(self.failed_urls)) > 0 else 0,
-            'output_directory': self.output_dir
+        total_urls = len(self.visited_urls) + len(self.failed_urls)
+        success_rate = (
+            (len(self.visited_urls) / total_urls * 100) if total_urls > 0 else 0
+        )
+
+        stats = {
+            "visited_urls": len(self.visited_urls),
+            "failed_urls": len(self.failed_urls),
+            "total_urls": total_urls,
+            "success_rate": success_rate,
+            "output_directory": self.output_dir,
         }
+
+        self.logger.info("Crawling statistics", stats)
+        return stats
 
 
 def main():
-    """Main entry point for the crawler."""
+    """Test the crawler."""
     dotenv.load_dotenv()
     email = os.getenv("SALESFORCE_EMAIL")
-    
+
     if not email:
-        print("❌ SALESFORCE_EMAIL not found in environment variables")
+        print("SALESFORCE_EMAIL not found in environment variables")
         sys.exit(1)
-    
-    if len(sys.argv) < 2:
-        print("Usage: python crawl.py <command> [args]")
-        print("Commands:")
-        print("  module <url>        - Crawl a single module")
-        print("  trail <url>         - Crawl an entire trail")
-        print("  batch <urls_file>   - Crawl URLs from file")
-        print("  stats               - Show crawling statistics")
-        sys.exit(1)
-    
-    command = sys.argv[1]
+
     crawler = TrailheadCrawler()
-    
-    if command == "stats":
-        stats = crawler.get_stats()
-        print(f"📊 Crawling Statistics:")
-        print(f"  Visited URLs: {stats['visited_urls']}")
-        print(f"  Failed URLs: {stats['failed_urls']}")
-        print(f"  Success Rate: {stats['success_rate']:.1f}%")
-        print(f"  Output Directory: {stats['output_directory']}")
-        return
-    
-    # Commands that require authentication
+
     with SalesforceAuth() as auth:
-        try:
-            result = auth.login(email, use_saved_session=True)
-            
-            if not result.is_logged_in:
-                print(f"❌ Login failed: {result.error}")
-                sys.exit(1)
-            
-            if result.session_restored:
-                print("🎉 Session restored successfully")
+        result = auth.login(email)
+        if result.is_logged_in:
+            module_url = "https://trailhead.salesforce.com/content/learn/modules/starting_force_com"
+            data = crawler.crawl_module(module_url, auth)
+            if data:
+                print("Crawl completed successfully!")
             else:
-                print("🎉 Login completed successfully")
-            
-            # Execute commands
-            if command == "module":
-                if len(sys.argv) < 3:
-                    print("❌ Module URL required")
-                    sys.exit(1)
-                
-                module_url = sys.argv[2]
-                result = crawler.crawl_module(module_url, auth)
-                if result:
-                    print(f"✅ Module crawl completed successfully")
-                else:
-                    print(f"❌ Module crawl failed")
-            
-            elif command == "trail":
-                if len(sys.argv) < 3:
-                    print("❌ Trail URL required")
-                    sys.exit(1)
-                
-                trail_url = sys.argv[2]
-                result = crawler.crawl_trail(trail_url, auth)
-                if 'error' not in result:
-                    print(f"✅ Trail crawl completed successfully")
-                else:
-                    print(f"❌ Trail crawl failed: {result['error']}")
-            
-            elif command == "batch":
-                if len(sys.argv) < 3:
-                    print("❌ URLs file required")
-                    sys.exit(1)
-                
-                urls_file = sys.argv[2]
-                if not os.path.exists(urls_file):
-                    print(f"❌ URLs file not found: {urls_file}")
-                    sys.exit(1)
-                
-                result = crawler.crawl_urls_from_file(urls_file, auth)
-                if 'error' not in result:
-                    print(f"✅ Batch crawl completed successfully")
-                else:
-                    print(f"❌ Batch crawl failed: {result['error']}")
-            
-            else:
-                print(f"❌ Unknown command: {command}")
-                sys.exit(1)
-            
-            # Show final stats
-            stats = crawler.get_stats()
-            print(f"\n📊 Final Statistics:")
-            print(f"  Visited URLs: {stats['visited_urls']}")
-            print(f"  Failed URLs: {stats['failed_urls']}")
-            print(f"  Success Rate: {stats['success_rate']:.1f}%")
-            
-        except Exception as e:
-            print(f"❌ Crawler error: {e}")
-            sys.exit(1)
+                print("Crawl failed!")
+        else:
+            print(f"Login failed: {result.error}")
 
 
 if __name__ == "__main__":

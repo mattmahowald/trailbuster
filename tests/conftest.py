@@ -1,17 +1,18 @@
 """Test configuration for pytest (if used)."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
 
-from tests.test_helpers import TestEnvironment
+import pytest
+
+from tests.test_helpers import TestEnvironmentHelper
 
 
 @pytest.fixture(scope="session")
 def test_environment():
     """Create a test environment for the entire test session."""
-    env = TestEnvironment()
+    env = TestEnvironmentHelper()
     env.setup()
     yield env
     env.teardown()
@@ -35,7 +36,7 @@ def fixtures_dir():
 def sample_html_files(fixtures_dir):
     """Get paths to sample HTML files."""
     return {
-        'module': fixtures_dir / "mock_module.html",
-        'lesson': fixtures_dir / "mock_lesson.html", 
-        'trail': fixtures_dir / "mock_trail.html"
+        "module": fixtures_dir / "mock_module.html",
+        "lesson": fixtures_dir / "mock_lesson.html",
+        "trail": fixtures_dir / "mock_trail.html",
     }

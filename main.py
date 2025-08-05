@@ -1,269 +1,334 @@
+#!/usr/bin/env python3
+"""
+TrailBuster - Salesforce Trailhead Automation Tool
+
+Main entry point for crawling Trailhead modules, lessons, and trails.
+"""
+
 import os
 import sys
+from typing import Dict, List
+
 import dotenv
 
 from salesforce.auth import SalesforceAuth
+from trailbuster.logger import setup_logging, get_logger, log_main, log_performance
 from crawl import TrailheadCrawler
 
 # Default module URL for testing
-DEFAULT_MODULE_URL = "https://trailhead.salesforce.com/content/learn/modules/starting_force_com"
+DEFAULT_MODULE_URL = (
+    "https://trailhead.salesforce.com/content/learn/modules/starting_force_com"
+)
+
+# Setup logging
+logger = get_logger("MAIN")
 
 
 def print_crawl_summary(crawl_data: dict) -> None:
-    """Print a summary of crawled module data."""
-    if not crawl_data:
-        return
-    
-    module = crawl_data.get('module', {})
-    lessons = crawl_data.get('lessons', [])
-    
-    print("\n🎉 Module crawl completed!")
-    print(f"📚 Module: {module.get('title', 'N/A')}")
-    print(f"📄 Description: {module.get('description', 'N/A')[:100]}...")
-    print(f"📝 Lessons crawled: {len(lessons)}")
-    
+    """Print a summary of the crawled data."""
+    module = crawl_data.get("module", {})
+    lessons = crawl_data.get("lessons", [])
+
+    log_main("Module crawl completed!")
+    log_main(f"Module: {module.get('title', 'N/A')}")
+    log_main(f"Description: {module.get('description', 'N/A')[:100]}...")
+    log_main(f"Lessons crawled: {len(lessons)}")
+
     if lessons:
-        print(f"📖 Lesson details:")
+        log_main("Lesson details:")
         for i, lesson in enumerate(lessons, 1):
-            print(f"  {i}. {lesson.get('title', 'N/A')}")
-            print(f"     Content items: {len(lesson.get('content', []))}")
-            print(f"     Learning objectives: {len(lesson.get('learning_objectives', []))}")
-            print(f"     Instructions: {len(lesson.get('instructions', []))}")
+            log_main(
+                f"  {i}. {lesson.get('title', 'N/A')}",
+                {
+                    "content_items": len(lesson.get("content", [])),
+                    "learning_objectives": len(lesson.get("learning_objectives", [])),
+                    "instructions": len(lesson.get("instructions", [])),
+                },
+            )
 
 
-def handle_module_crawl(email: str, module_url: str = DEFAULT_MODULE_URL, use_saved_session: bool = True) -> None:
+def handle_module_crawl(
+    email: str, module_url: str = DEFAULT_MODULE_URL, use_saved_session: bool = True
+) -> None:
     """Handle login process and crawl the specified module."""
+    logger.start_operation(
+        "module_crawl", module_url=module_url, use_saved_session=use_saved_session
+    )
+
     crawler = TrailheadCrawler()
-    
+
     with SalesforceAuth() as auth:
         try:
             result = auth.login(email, use_saved_session)
-            
+
             if result.session_restored:
-                print("🎉 Session restored! Starting module crawl...")
+                log_main("Session restored! Starting module crawl...")
             elif result.is_logged_in:
-                print("🎉 Login completed! Starting module crawl...")
+                log_main("Login completed! Starting module crawl...")
             else:
-                print(f"❌ Login failed: {result.error}")
+                logger.error(f"Login failed: {result.error}")
+                logger.end_operation("module_crawl", success=False, error=result.error)
                 return
-            
+
             # Crawl the specified module
-            print(f"\n🔍 Starting comprehensive crawl of module...")
+            log_main("Starting comprehensive crawl of module...")
             crawl_data = crawler.crawl_module(module_url, auth)
-            
+
             if crawl_data:
                 print_crawl_summary(crawl_data)
-                
+
                 # Show crawling statistics
                 stats = crawler.get_stats()
-                print(f"\n📊 Crawl Statistics:")
-                print(f"  Total URLs processed: {stats['visited_urls']}")
-                print(f"  Failed URLs: {stats['failed_urls']}")
-                print(f"  Success rate: {stats['success_rate']:.1f}%")
-                print(f"  Data saved to: {stats['output_directory']}")
+                log_main("Crawl Statistics")
+                logger.info("Statistics", stats)
+                logger.end_operation("module_crawl", success=True, stats=stats)
             else:
-                print("❌ Failed to crawl module")
-                
+                logger.error("Failed to crawl module")
+                logger.end_operation("module_crawl", success=False)
+
         except Exception as e:
-            print(f"❌ Error: {e}")
+            logger.error(f"Error during module crawl: {e}")
+            logger.end_operation("module_crawl", success=False, error=str(e))
 
 
-def handle_trail_crawl(email: str, trail_url: str, use_saved_session: bool = True) -> None:
-    """Handle login process and crawl an entire trail."""
+def handle_trail_crawl(
+    email: str, trail_url: str, use_saved_session: bool = True
+) -> None:
+    """Handle login process and crawl the specified trail."""
+    logger.start_operation(
+        "trail_crawl", trail_url=trail_url, use_saved_session=use_saved_session
+    )
+
     crawler = TrailheadCrawler()
-    
+
     with SalesforceAuth() as auth:
         try:
             result = auth.login(email, use_saved_session)
-            
+
             if result.session_restored:
-                print("🎉 Session restored! Starting trail crawl...")
+                log_main("Session restored! Starting trail crawl...")
             elif result.is_logged_in:
-                print("🎉 Login completed! Starting trail crawl...")
+                log_main("Login completed! Starting trail crawl...")
             else:
-                print(f"❌ Login failed: {result.error}")
+                logger.error(f"Login failed: {result.error}")
+                logger.end_operation("trail_crawl", success=False, error=result.error)
                 return
-            
+
             # Crawl the trail
-            print(f"\n🛤️  Starting comprehensive crawl of trail...")
+            log_main("Starting comprehensive crawl of trail...")
             trail_data = crawler.crawl_trail(trail_url, auth)
-            
-            if 'error' not in trail_data:
-                print(f"\n🎉 Trail crawl completed!")
-                trail_info = trail_data.get('trail', {})
-                modules = trail_data.get('modules', [])
-                
-                print(f"🛤️  Trail: {trail_info.get('title', 'N/A')}")
-                print(f"📚 Modules processed: {len(modules)}")
-                
+
+            if "error" not in trail_data:
+                log_main("Trail crawl completed!")
+                trail_info = trail_data.get("trail", {})
+                modules = trail_data.get("modules", [])
+
+                log_main(f"Trail: {trail_info.get('title', 'N/A')}")
+                log_main(f"Modules processed: {len(modules)}")
+
                 # Show statistics
                 stats = crawler.get_stats()
-                print(f"\n📊 Crawl Statistics:")
-                print(f"  Total URLs processed: {stats['visited_urls']}")
-                print(f"  Failed URLs: {stats['failed_urls']}")
-                print(f"  Success rate: {stats['success_rate']:.1f}%")
-                print(f"  Data saved to: {stats['output_directory']}")
+                log_main("Crawl Statistics")
+                logger.info("Statistics", stats)
+                logger.end_operation("trail_crawl", success=True, stats=stats)
             else:
-                print(f"❌ Trail crawl failed: {trail_data['error']}")
-                
+                logger.error(f"Trail crawl failed: {trail_data['error']}")
+                logger.end_operation(
+                    "trail_crawl", success=False, error=trail_data["error"]
+                )
+
         except Exception as e:
-            print(f"❌ Error: {e}")
+            logger.error(f"Error during trail crawl: {e}")
+            logger.end_operation("trail_crawl", success=False, error=str(e))
 
 
-def handle_batch_crawl(email: str, urls_file: str, use_saved_session: bool = True) -> None:
-    """Handle login process and batch crawl URLs from file."""
+def handle_batch_crawl(
+    email: str, urls_file: str, use_saved_session: bool = True
+) -> None:
+    """Handle login process and crawl URLs from a file."""
+    logger.start_operation(
+        "batch_crawl", urls_file=urls_file, use_saved_session=use_saved_session
+    )
+
     if not os.path.exists(urls_file):
-        print(f"❌ URLs file not found: {urls_file}")
+        logger.error(f"URLs file not found: {urls_file}")
+        logger.end_operation("batch_crawl", success=False, error="File not found")
         return
-    
+
     crawler = TrailheadCrawler()
-    
+
     with SalesforceAuth() as auth:
         try:
             result = auth.login(email, use_saved_session)
-            
+
             if result.session_restored:
-                print("🎉 Session restored! Starting batch crawl...")
+                log_main("Session restored! Starting batch crawl...")
             elif result.is_logged_in:
-                print("🎉 Login completed! Starting batch crawl...")
+                log_main("Login completed! Starting batch crawl...")
             else:
-                print(f"❌ Login failed: {result.error}")
+                logger.error(f"Login failed: {result.error}")
+                logger.end_operation("batch_crawl", success=False, error=result.error)
                 return
-            
-            # Batch crawl
-            print(f"\n📋 Starting batch crawl from {urls_file}...")
+
+            # Crawl URLs from file
+            log_main(f"Starting batch crawl from {urls_file}...")
             batch_results = crawler.crawl_urls_from_file(urls_file, auth)
-            
-            if 'error' not in batch_results:
-                print(f"\n🎉 Batch crawl completed!")
-                print(f"📊 URLs processed: {len(batch_results)}")
-                
+
+            if "error" not in batch_results:
+                log_main("Batch crawl completed!")
+                log_main(f"URLs processed: {len(batch_results)}")
+
                 # Show statistics
                 stats = crawler.get_stats()
-                print(f"\n📊 Final Statistics:")
-                print(f"  Total URLs processed: {stats['visited_urls']}")
-                print(f"  Failed URLs: {stats['failed_urls']}")
-                print(f"  Success rate: {stats['success_rate']:.1f}%")
-                print(f"  Data saved to: {stats['output_directory']}")
+                log_main("Final Statistics")
+                logger.info("Statistics", stats)
+                logger.end_operation("batch_crawl", success=True, stats=stats)
             else:
-                print(f"❌ Batch crawl failed: {batch_results['error']}")
-                
+                logger.error(f"Batch crawl failed: {batch_results['error']}")
+                logger.end_operation(
+                    "batch_crawl", success=False, error=batch_results["error"]
+                )
+
         except Exception as e:
-            print(f"❌ Error: {e}")
+            logger.error(f"Error during batch crawl: {e}")
+            logger.end_operation("batch_crawl", success=False, error=str(e))
 
 
-def show_crawler_stats():
+def show_crawler_stats() -> None:
     """Show crawling statistics."""
     crawler = TrailheadCrawler()
     stats = crawler.get_stats()
-    print(f"📊 Crawling Statistics:")
-    print(f"  Visited URLs: {stats['visited_urls']}")
-    print(f"  Failed URLs: {stats['failed_urls']}")
-    print(f"  Success Rate: {stats['success_rate']:.1f}%")
-    print(f"  Output Directory: {stats['output_directory']}")
+
+    log_main("Crawling Statistics")
+    logger.info("Statistics", stats)
 
 
-def clear_session():
+def clear_session() -> None:
     """Clear saved session."""
-    with SalesforceAuth() as auth:
+    try:
+        auth = SalesforceAuth()
         auth.clear_session()
+        log_main("Session cleared successfully!")
+    except Exception as e:
+        logger.error(f"Error clearing session: {e}")
 
 
 def print_help():
-    """Print usage information."""
-    print("TrailBuster - Salesforce Trailhead Automation Tool")
-    print()
-    print("Usage:")
-    print("  python main.py <module_url>           - Crawl a single module")
-    print("  python main.py trail <trail_url>      - Crawl an entire trail")
-    print("  python main.py batch <urls_file>      - Batch crawl URLs from file")
-    print()
-    print("Options:")
-    print("  python main.py stats                  - Show crawling statistics")
-    print("  python main.py --clear-session        - Clear saved session")
-    print("  python main.py --no-session           - Force new login (ignore saved session)")
-    print("  python main.py --help                 - Show this help message")
-    print()
-    print("Examples:")
-    print("  python main.py https://trailhead.salesforce.com/content/learn/modules/starting_force_com")
-    print("  python main.py trail https://trailhead.salesforce.com/trails/force_com_admin_beginner")
-    print("  python main.py batch sample_urls.txt")
-    print()
-    print("All crawled content is structured for LLM processing and saved to the 'crawled_data' directory.")
+    """Print help information."""
+    help_text = """
+TrailBuster - Salesforce Trailhead Automation Tool
+
+Usage:
+  python main.py                                    # Crawl default module
+  python main.py <module_url>                       # Crawl specific module
+  python main.py trail <trail_url>                  # Crawl entire trail
+  python main.py batch <urls_file>                  # Batch crawl from file
+  python main.py stats                              # Show crawling statistics
+  python main.py --clear-session                    # Clear saved session
+  python main.py --no-session                       # Force new login
+  python main.py --help                             # Show this help
+
+Examples:
+  python main.py https://trailhead.salesforce.com/content/learn/modules/starting_force_com
+  python main.py trail https://trailhead.salesforce.com/trails/force_com_admin_beginner
+  python main.py batch sample_urls.txt
+
+Options:
+  --no-session    Force new login (don't use saved session)
+  --clear-session Clear saved session data
+  --help          Show this help message
+"""
+    print(help_text)
 
 
 def main():
     """Main entry point for TrailBuster."""
+    # Setup logging first
+    setup_logging(log_level="INFO")
+
+    logger.start_operation("trailbuster_application")
+
     dotenv.load_dotenv()
     email = os.getenv("SALESFORCE_EMAIL")
-    
+
     if not email:
-        print("❌ SALESFORCE_EMAIL not found in environment variables")
-        print("Please add SALESFORCE_EMAIL=your_email@example.com to your .env file")
+        logger.critical("SALESFORCE_EMAIL not found in environment variables")
+        logger.critical(
+            "Please add SALESFORCE_EMAIL=your_email@example.com to your .env file"
+        )
         sys.exit(1)
-    
+
     # Parse command line arguments
     if len(sys.argv) == 1:
         # Default behavior: crawl default module
-        print("🔍 No URL specified, crawling default module...")
+        log_main("No URL specified, crawling default module...")
         handle_module_crawl(email)
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     command = sys.argv[1]
-    
+
     # Help command
     if command in ["--help", "-h", "help"]:
         print_help()
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     # Session management commands
     if command == "--clear-session":
         clear_session()
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     # Statistics command
     elif command == "stats":
         show_crawler_stats()
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     # Trail crawling command
     elif command == "trail":
         if len(sys.argv) < 3:
-            print("❌ Trail URL required for trail command")
-            print("Usage: python main.py trail <trail_url>")
+            logger.error("Trail URL required for trail command")
+            logger.error("Usage: python main.py trail <trail_url>")
             sys.exit(1)
-        
+
         trail_url = sys.argv[2]
         use_saved_session = "--no-session" not in sys.argv
         handle_trail_crawl(email, trail_url, use_saved_session)
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     # Batch crawling command
     elif command == "batch":
         if len(sys.argv) < 3:
-            print("❌ URLs file required for batch command")
-            print("Usage: python main.py batch <urls_file>")
+            logger.error("URLs file required for batch command")
+            logger.error("Usage: python main.py batch <urls_file>")
             sys.exit(1)
-        
+
         urls_file = sys.argv[2]
         use_saved_session = "--no-session" not in sys.argv
         handle_batch_crawl(email, urls_file, use_saved_session)
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
+
     # Check for --no-session flag
     use_saved_session = "--no-session" not in sys.argv
-    
+
     # If first argument looks like a URL, treat it as a module URL
     if command.startswith("http"):
         module_url = command
         handle_module_crawl(email, module_url, use_saved_session)
+        logger.end_operation("trailbuster_application", success=True)
         return
-    
-    # Unknown command
-    else:
-        print(f"❌ Unknown command: {command}")
-        print("Use 'python main.py --help' for usage information")
-        sys.exit(1)
+
+    # If we get here, the command wasn't recognized
+    logger.error(f"Unknown command: {command}")
+    logger.error("Use --help for usage information")
+    logger.end_operation(
+        "trailbuster_application", success=False, error=f"Unknown command: {command}"
+    )
+    sys.exit(1)
 
 
 if __name__ == "__main__":
