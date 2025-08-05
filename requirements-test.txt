@@ -1,0 +1,11 @@
+# Test dependencies for TrailBuster
+playwright>=1.40.0,<2.0.0
+python-dotenv>=1.0.0,<2.0.0
+google-api-python-client>=2.177.0,<3.0.0
+google-auth-httplib2>=0.2.0,<0.3.0
+google-auth-oauthlib>=1.2.2,<2.0.0
+
+# Optional test dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0

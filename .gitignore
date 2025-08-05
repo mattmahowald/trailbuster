@@ -1,13 +1,97 @@
+# Environment and configuration files
 .env
+.env.local
+.env.production
+.env.staging
+
+# Sensitive authentication files
 credentials.json
 token.json
-poetry.lock
+trailhead_session.json
+
+# Generated data and crawled content
+crawled_data/
+module_info.json
+*.html
+*.json.bak
+
+# Test files and temporary data
+lesson.html
+module.html
+trail.html
+TEST_SUITE_SUMMARY.md
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.pyw
-*.pyz
-*.pywz
-*.pyzw
-*.pyzwz
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+.coverage.*
+htmlcov/
+
+# Poetry
+poetry.lock
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
